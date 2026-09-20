@@ -9,7 +9,7 @@ class ChatState(TypedDict):
 
     messages: Annotated[list[BaseMessage], add_messages]
 
-# llm = ChatOpenAI()
+#llm = ChatOpenAI()
 model=ChatOllama(model="llama3.2")
 
 def chat_node(state: ChatState):
