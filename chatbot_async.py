@@ -10,14 +10,11 @@ from dotenv import load_dotenv
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
-import requests
-import warnings
-warnings.filterwarnings("ignore")
+import asyncio
+
 
 load_dotenv()
-class ChatState(TypedDict):
 
-    messages: Annotated[list[BaseMessage], add_messages]
 
 # llm = ChatOpenAI()
 model=ChatOllama(model="llama3.2")
@@ -52,43 +49,37 @@ def calculator(first_num: float, second_num: float, operation: str) -> dict:
 tools = [calculator]
 llm_with_tools = model.bind_tools(tools)
 
+
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
+def build_grapgh():
+    async def chat_node(state: ChatState):
+        messages = state['messages']
+        response = await llm_with_tools.ainvoke(messages)
+        return {'messages': [response]}
+
+    tool_node = ToolNode(tools)
+
+    graph = StateGraph(ChatState)
+    graph.add_node("chat_node", chat_node)
+    graph.add_node("tools", tool_node)
+
+    graph.add_edge(START, "chat_node")
+
+    graph.add_conditional_edges("chat_node",tools_condition)
+    graph.add_edge('tools', 'chat_node')
+
+    chatbot = graph.compile()
 
 
-def chat_node(state: ChatState):
-    """LLM node that may answer or request a tool call."""
+    return chatbot
+async def main():
+    chabot=build_grapgh()
 
-    # take user query from state
-    messages = state['messages']
+    # runnig the graph 
+    result=await chabot.ainvoke({"messages":[HumanMessage(content="Find the modulus of 132354 and 23 and give answer. like a cricket commentator.")]})
+    print(result['messages'][-1].content)
 
-    # send to llm
-    response = llm_with_tools.invoke(messages)
-
-    # response store state
-    return {'messages': [response]}
-
-tool_node = ToolNode(tools)
-
-conn=sqlite3.connect(database='chatbot.db', check_same_thread=False)
-checkpointer=SqliteSaver(conn=conn)
-
-graph = StateGraph(ChatState)
-graph.add_node("chat_node", chat_node)
-graph.add_node("tools", tool_node)
-
-graph.add_edge(START, "chat_node")
-
-graph.add_conditional_edges("chat_node",tools_condition)
-graph.add_edge('tools', 'chat_node')
-
-chatbot = graph.compile(checkpointer=checkpointer)
-
-
-
-def retrieve_all_threads():
-    all_threads=set()
-    for checkpoint in checkpointer.list(None):
-        all_threads.add(checkpoint.config['configurable']['thread_id'])
-    return list(all_threads)
+if __name__=='__main__':
+    asyncio.run(main())
