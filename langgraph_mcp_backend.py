@@ -1,94 +1,158 @@
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage,HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langchain_ollama  import ChatOllama
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
-from dotenv import load_dotenv
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.tools import tool
+from langchain_ollama  import ChatOllama
+from langchain_core.tools import tool, BaseTool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from dotenv import load_dotenv
+import aiosqlite
 import requests
-import warnings
-warnings.filterwarnings("ignore")
+import asyncio
+import threading
+import sys
+import os
+from pathlib import Path
+
 
 load_dotenv()
-class ChatState(TypedDict):
 
-    messages: Annotated[list[BaseMessage], add_messages]
+# Dedicated async loop for backend tasks
+_ASYNC_LOOP = asyncio.new_event_loop()
+_ASYNC_THREAD = threading.Thread(target=_ASYNC_LOOP.run_forever, daemon=True)
+_ASYNC_THREAD.start()
 
+
+def _submit_async(coro):
+    return asyncio.run_coroutine_threadsafe(coro, _ASYNC_LOOP)
+
+
+def run_async(coro):
+    return _submit_async(coro).result()
+
+
+def submit_async_task(coro):
+    """Schedule a coroutine on the backend event loop."""
+    return _submit_async(coro)
+
+
+# -------------------
+# 1. LLM
+# -------------------
 # llm = ChatOpenAI()
-model=ChatOllama(model="llama3.2")
-# tools
+llm=ChatOllama(model="llama3.2")
+
+# -------------------
+# 2. Tools
+# -------------------
+search_tool = DuckDuckGoSearchRun(region="us-en")
 
 
 @tool
-def calculator(first_num: float, second_num: float, operation: str) -> dict:
+def get_stock_price(symbol: str) -> dict:
     """
-    Perform a basic arithmetic operation on two numbers.
-    Supported operations: add, sub, mul, div
+    Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA') 
+    using Alpha Vantage with API key in the URL.
     """
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey=JREKQ48MRUIJAAFA"
+    r = requests.get(url)
+    return r.json()
+
+
+server_configs = {
+    "expense": {
+        "transport": "streamable_http",
+        "url": "https://splendid-gold-dingo.fastmcp.app/mcp"
+    }
+}
+
+
+math_server_path = Path(
+    os.getenv(
+        "MCP_MATH_SERVER_PATH",
+        str(Path.home() / "OneDrive" / "Desktop" / "mcp-math-server" / "main.py"),
+    )
+)
+if math_server_path.is_file():
+    server_configs["arith"] = {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": [str(math_server_path)],
+    }
+
+client = MultiServerMCPClient(server_configs)
+
+def load_mcp_tools() -> list[BaseTool]:
     try:
-        if operation == "add":
-            result = first_num + second_num
-        elif operation == "sub":
-            result = first_num - second_num
-        elif operation == "mul":
-            result = first_num * second_num
-        elif operation == "div":
-            if second_num == 0:
-                return {"error": "Division by zero is not allowed"}
-            result = first_num / second_num
-        else:
-            return {"error": f"Unsupported operation '{operation}'"}
-        
-        return {"first_num": first_num, "second_num": second_num, "operation": operation, "result": result}
-    except Exception as e:
-        return {"error": str(e)}
+        return run_async(client.get_tools())
+    except Exception:
+        return []
 
 
-tools = [calculator]
-llm_with_tools = model.bind_tools(tools)
+mcp_tools = load_mcp_tools()
 
+tools = [search_tool, get_stock_price, *mcp_tools]
+llm_with_tools = llm.bind_tools(tools) if tools else llm
+
+# -------------------
+# 3. State
+# -------------------
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
-
-
-def chat_node(state: ChatState):
+# -------------------
+# 4. Nodes
+# -------------------
+async def chat_node(state: ChatState):
     """LLM node that may answer or request a tool call."""
+    messages = state["messages"]
+    response = await llm_with_tools.ainvoke(messages)
+    return {"messages": [response]}
 
-    # take user query from state
-    messages = state['messages']
 
-    # send to llm
-    response = llm_with_tools.invoke(messages)
+tool_node = ToolNode(tools) if tools else None
 
-    # response store state
-    return {'messages': [response]}
+# -------------------
+# 5. Checkpointer
+# -------------------
 
-tool_node = ToolNode(tools)
 
-conn=sqlite3.connect(database='chatbot.db', check_same_thread=False)
-checkpointer=SqliteSaver(conn=conn)
+async def _init_checkpointer():
+    conn = await aiosqlite.connect(database="chatbot.db")
+    return AsyncSqliteSaver(conn)
 
+
+checkpointer = run_async(_init_checkpointer())
+
+# -------------------
+# 6. Graph
+# -------------------
 graph = StateGraph(ChatState)
 graph.add_node("chat_node", chat_node)
-graph.add_node("tools", tool_node)
-
 graph.add_edge(START, "chat_node")
 
-graph.add_conditional_edges("chat_node",tools_condition)
-graph.add_edge('tools', 'chat_node')
+if tool_node:
+    graph.add_node("tools", tool_node)
+    graph.add_conditional_edges("chat_node", tools_condition)
+    graph.add_edge("tools", "chat_node")
+else:
+    graph.add_edge("chat_node", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
+# -------------------
+# 7. Helper
+# -------------------
+async def _alist_threads():
+    all_threads = set()
+    async for checkpoint in checkpointer.alist(None):
+        all_threads.add(checkpoint.config["configurable"]["thread_id"])
+    return list(all_threads)
 
 
 def retrieve_all_threads():
-    all_threads=set()
-    for checkpoint in checkpointer.list(None):
-        all_threads.add(checkpoint.config['configurable']['thread_id'])
-    return list(all_threads)
+    return run_async(_alist_threads())

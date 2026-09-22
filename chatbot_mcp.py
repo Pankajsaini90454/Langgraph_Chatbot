@@ -79,7 +79,7 @@ async def main():
     chabot= await build_grapgh()
 
     # runnig the graph 
-    result=await chabot.ainvoke({"messages":[HumanMessage(content="Find the modulus of 132354 and 23 and give answer. like a cricket commentator.")]})
+    result=await chabot.ainvoke({"messages":[HumanMessage(content="Add a an expense rupees 500 for a udemy course on 10th november.")]})
     print(result['messages'][-1].content)
 
 if __name__=='__main__':
