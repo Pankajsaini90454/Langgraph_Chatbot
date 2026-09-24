@@ -1,10 +1,10 @@
 from __future__ import annotations
-
+# from google import genai
 import os
 import sqlite3
 import tempfile
 from typing import Annotated, Any, Dict, Optional, TypedDict
-
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -12,7 +12,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import tool
-# from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
@@ -22,8 +22,30 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama  import ChatOllama
 from langchain_core.runnables import RunnableConfig
 
+import os
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+load_dotenv()
+
+# api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+# if not api_key:
+#     raise ValueError("API Key not found! Please check your .env file.")
+
+# model = ChatGoogleGenerativeAI(
+#     model="gemini-3.7-flash",  # Official model string
+#     api_key=api_key,
+#     max_retries=5,              # Automatically retries if Google throws a 503 error
+#     timeout=60
+# )
+
+
 load_dotenv()
 model=ChatOllama(model="llama3.2")
+# model = ChatGoogleGenerativeAI(
+#     model="gemini-2.5-flash"  # Highly stable, low latency alternative
+# )
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
